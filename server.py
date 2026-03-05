@@ -1,5 +1,7 @@
 import os
-from flask import Flask, request, jsonify, send_file, render_template
+import hashlib
+from flask import Flask, request, jsonify, send_file, render_template, session
+from tinydb import TinyDB, Query
 import pandas as pd
 import numpy as np
 from scipy import stats
@@ -9,14 +11,86 @@ import warnings
 warnings.filterwarnings('ignore')
 
 app = Flask(__name__)
+app.secret_key = 'dataforge_secret_key_2024'
+
 UPLOAD_FOLDER = 'uploads'
 STATIC_FOLDER = 'static'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(STATIC_FOLDER, exist_ok=True)
 
+# TinyDB setup
+db = TinyDB('users.json')
+users_table = db.table('users')
+User = Query()
+
+
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+# ─── AUTH ROUTES ────────────────────────────────────────────────────────────────
+
+@app.route('/auth/signup', methods=['POST'])
+def signup():
+    data = request.get_json()
+    username = data.get('username', '').strip()
+    password = data.get('password', '').strip()
+    email = data.get('email', '').strip()
+
+    if not username or not password or not email:
+        return jsonify({'error': 'All fields are required'}), 400
+    if len(password) < 6:
+        return jsonify({'error': 'Password must be at least 6 characters'}), 400
+    if users_table.search(User.username == username):
+        return jsonify({'error': 'Username already exists'}), 409
+    if users_table.search(User.email == email):
+        return jsonify({'error': 'Email already registered'}), 409
+
+    users_table.insert({
+        'username': username,
+        'email': email,
+        'password': hash_password(password)
+    })
+    session['user'] = username
+    return jsonify({'success': True, 'username': username})
+
+
+@app.route('/auth/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    username = data.get('username', '').strip()
+    password = data.get('password', '').strip()
+
+    if not username or not password:
+        return jsonify({'error': 'Username and password are required'}), 400
+
+    user = users_table.search(
+        (User.username == username) & (User.password == hash_password(password))
+    )
+    if not user:
+        return jsonify({'error': 'Invalid username or password'}), 401
+
+    session['user'] = username
+    return jsonify({'success': True, 'username': username})
+
+
+@app.route('/auth/logout', methods=['POST'])
+def logout():
+    session.pop('user', None)
+    return jsonify({'success': True})
+
+
+@app.route('/auth/status')
+def auth_status():
+    if 'user' in session:
+        return jsonify({'logged_in': True, 'username': session['user']})
+    return jsonify({'logged_in': False})
+
+
+# ─── MAIN APP ────────────────────────────────────────────────────────────────
+
 def identify_distribution(series):
     skew = series.skew()
-    kurt = series.kurtosis()
     if abs(skew) < 0.5:
         return 'normal'
     elif skew > 1:
@@ -25,6 +99,7 @@ def identify_distribution(series):
         return 'left_skewed'
     else:
         return 'moderately_skewed'
+
 
 def handle_missing_values(df, summary):
     for col in df.columns:
@@ -48,6 +123,7 @@ def handle_missing_values(df, summary):
                 summary['imputations'][col] = {'method': f"median ({val:.2f})", 'missing_pct': pct}
     return df
 
+
 def treat_outliers(df, summary, method='cap'):
     for col in df.select_dtypes(include=[np.number]).columns:
         Q1 = df[col].quantile(0.25)
@@ -63,6 +139,7 @@ def treat_outliers(df, summary, method='cap'):
                 summary['outliers'][col] = {'action': f"capped to [{lower:.2f}, {upper:.2f}]", 'count': outlier_count}
     return df
 
+
 def perform_eda(df):
     summary = {
         'shape': list(df.shape),
@@ -76,13 +153,14 @@ def perform_eda(df):
     for col in df.columns:
         missing = int(df[col].isnull().sum())
         if missing > 0:
-            summary['missing'][col] = {'count': missing, 'pct': round(missing/len(df)*100,2)}
+            summary['missing'][col] = {'count': missing, 'pct': round(missing / len(df) * 100, 2)}
         if df[col].dtype == 'object':
             summary['categorical'].append(col)
         else:
             summary['numerical'].append(col)
             summary['distributions'][col] = identify_distribution(df[col].dropna())
     return summary
+
 
 def get_numerical_stats(df, numerical_cols):
     stats_data = {}
@@ -98,11 +176,10 @@ def get_numerical_stats(df, numerical_cols):
             'kurtosis': round(float(s.kurtosis()), 4),
             'q25': round(float(s.quantile(0.25)), 4),
             'q75': round(float(s.quantile(0.75)), 4),
-            'histogram': {
-                'values': s.tolist()[:500],  # sample for viz
-            }
+            'histogram': {'values': s.tolist()[:500]}
         }
     return stats_data
+
 
 def get_categorical_stats(df, categorical_cols):
     cat_data = {}
@@ -115,49 +192,42 @@ def get_categorical_stats(df, categorical_cols):
         }
     return cat_data
 
+
 def get_correlation_matrix(df, numerical_cols):
     if len(numerical_cols) < 2:
         return {}
     corr = df[numerical_cols].corr().round(3)
-    return {
-        'columns': list(corr.columns),
-        'matrix': corr.values.tolist()
-    }
+    return {'columns': list(corr.columns), 'matrix': corr.values.tolist()}
+
 
 def perform_feature_engineering(df, summary):
-    original_cols = list(df.columns)
     fe_log = []
     numerical_cols = summary['numerical']
     categorical_cols = summary['categorical']
 
-    # 1. Interaction features (top numerical pairs)
     if len(numerical_cols) >= 2:
         pairs = [(numerical_cols[i], numerical_cols[j])
                  for i in range(min(3, len(numerical_cols)))
-                 for j in range(i+1, min(4, len(numerical_cols)))]
+                 for j in range(i + 1, min(4, len(numerical_cols)))]
         for col1, col2 in pairs:
             new_col = f"{col1}_x_{col2}"
             df[new_col] = df[col1] * df[col2]
             fe_log.append({'feature': new_col, 'type': 'Interaction', 'formula': f"{col1} × {col2}"})
 
-    # 2. Ratio features
     if len(numerical_cols) >= 2:
         col1, col2 = numerical_cols[0], numerical_cols[1]
         new_col = f"{col1}_div_{col2}"
         df[new_col] = df[col1] / (df[col2] + 1e-9)
         fe_log.append({'feature': new_col, 'type': 'Ratio', 'formula': f"{col1} / {col2}"})
 
-    # 3. Polynomial features for top numerical cols
     for col in numerical_cols[:3]:
         sq_col = f"{col}_squared"
         df[sq_col] = df[col] ** 2
         fe_log.append({'feature': sq_col, 'type': 'Polynomial', 'formula': f"{col}²"})
-
         cube_col = f"{col}_cubed"
         df[cube_col] = df[col] ** 3
         fe_log.append({'feature': cube_col, 'type': 'Polynomial', 'formula': f"{col}³"})
 
-    # 4. Log transform for skewed columns
     for col in numerical_cols:
         dist = summary['distributions'].get(col, '')
         if 'skewed' in dist and df[col].min() > 0:
@@ -165,7 +235,6 @@ def perform_feature_engineering(df, summary):
             df[log_col] = np.log1p(df[col])
             fe_log.append({'feature': log_col, 'type': 'Log Transform', 'formula': f"log(1 + {col})"})
 
-    # 5. Aggregation features for categorical + numerical
     for cat_col in categorical_cols[:2]:
         for num_col in numerical_cols[:2]:
             group = df.groupby(cat_col)[num_col]
@@ -176,16 +245,14 @@ def perform_feature_engineering(df, summary):
             fe_log.append({'feature': mean_col, 'type': 'Group Aggregation', 'formula': f"mean({num_col}) by {cat_col}"})
             fe_log.append({'feature': std_col, 'type': 'Group Aggregation', 'formula': f"std({num_col}) by {cat_col}"})
 
-    # 6. Binning for top numerical columns
     for col in numerical_cols[:2]:
         bin_col = f"{col}_bin"
         try:
-            df[bin_col] = pd.qcut(df[col], q=4, labels=['Q1','Q2','Q3','Q4'], duplicates='drop').astype(str)
+            df[bin_col] = pd.qcut(df[col], q=4, labels=['Q1', 'Q2', 'Q3', 'Q4'], duplicates='drop').astype(str)
             fe_log.append({'feature': bin_col, 'type': 'Binning', 'formula': f"quantile bins of {col}"})
         except:
             pass
 
-    # 7. Label encode new categorical + original categorical
     all_cat = [c for c in df.columns if df[c].dtype == 'object']
     for col in all_cat:
         enc_col = f"{col}_encoded"
@@ -195,6 +262,7 @@ def perform_feature_engineering(df, summary):
 
     new_features = [f['feature'] for f in fe_log]
     return df, fe_log, new_features
+
 
 def suggest_scaling_methods(df, summary):
     suggestions = {}
@@ -207,6 +275,7 @@ def suggest_scaling_methods(df, summary):
         else:
             suggestions[col] = {'method': 'MinMaxScaler', 'reason': 'Bounded range preferred'}
     return suggestions
+
 
 def suggest_encoding(df, summary):
     suggestions = {}
@@ -221,6 +290,7 @@ def suggest_encoding(df, summary):
         else:
             suggestions[col] = {'method': 'Target Encoding / Embedding', 'cardinality': cardinality}
     return suggestions
+
 
 def recommend_algorithms(df):
     recommendation = {}
@@ -257,19 +327,23 @@ def recommend_algorithms(df):
         recommendation['class_balance'] = None
     return recommendation
 
+
 @app.route('/')
 def index():
     return render_template('index.html')
 
+
 @app.route('/upload', methods=['POST'])
 def upload_csv():
+    if 'user' not in session:
+        return jsonify({'error': 'Unauthorized. Please login first.'}), 401
+
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
     file = request.files['file']
     if not file.filename.endswith('.csv'):
         return jsonify({'error': 'Only CSV files are allowed'}), 400
-    filepath = os.path.join(UPLOAD_FOLDER, file.filename)
-    
+
     try:
         df = pd.read_csv(file)
     except Exception as e:
@@ -307,9 +381,13 @@ def upload_csv():
         'download_link': '/download'
     })
 
+
 @app.route('/download', methods=['GET'])
 def download_file():
+    if 'user' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
     return send_file(os.path.join(STATIC_FOLDER, 'cleaned_dataset.csv'), as_attachment=True)
+
 
 if __name__ == '__main__':
     app.run(debug=True)
