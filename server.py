@@ -269,9 +269,9 @@ def upload_csv():
     if not file.filename.endswith('.csv'):
         return jsonify({'error': 'Only CSV files are allowed'}), 400
     filepath = os.path.join(UPLOAD_FOLDER, file.filename)
-    file.save(filepath)
+    
     try:
-        df = pd.read_csv(filepath)
+        df = pd.read_csv(file)
     except Exception as e:
         return jsonify({'error': f'Error reading CSV: {str(e)}'}), 500
 
