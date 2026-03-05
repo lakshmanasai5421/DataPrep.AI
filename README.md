@@ -1,4 +1,4 @@
-## AutoEDA Automatic EDA and preprocessing tool using Machine Learning
+## DataPrep.AI 
 
 This project is a smart data assistant that helps you clean your CSV datasets, perform basic EDA, and even get machine learning advice — all from a simple web interface built with Flask.
 
@@ -56,7 +56,6 @@ This project is a smart data assistant that helps you clean your CSV datasets, p
 ```
 eda-cleaner-app/
 ├── app.py                  # Flask backend logic
-├── uploads/                # Where uploaded CSVs are saved
 ├── static/                 # Where cleaned CSVs are stored
 ├── templates/
 │   └── index.html          # Web interface
