@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+uploads/
+users.json
+static/cleaned_dataset.csv
+.venv/
+venv/
+.env
